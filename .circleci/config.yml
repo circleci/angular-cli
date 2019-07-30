@@ -60,24 +60,14 @@ executors:
 # https://circleci.com/docs/2.0/reusing-config/#authoring-reusable-commands
 commands:
   setup_windows:
-    steps:
-      - checkout
+    steps:     
       - run:
           # Need to install node and yarn before, as the base windows image doesn't have anything.
           # TODO: remove when CircleCI provides preconfigured node images/VMs.
           name: Setup windows node environment
-          command: ./.circleci/windows-env.ps1
-      # TODO: remove commands other than the e2e runner when workspaces on windows are well supported.
-      - run:
-          name: Rebase PR on target branch
-          command: >
-            if (Test-Path env:CIRCLE_PR_NUMBER) {
-              git config user.name "angular-ci"
-              git config user.email "angular-ci"
-              node tools\rebase-pr.js angular/angular-cli $env:CIRCLE_PR_NUMBER }
+          command: ./.circleci/windows-env.ps1             
       - run: node --version
       - run: yarn --version
-      - run: yarn install --frozen-lockfile
 
   setup_bazel_rbe:
     parameters:
@@ -212,29 +202,6 @@ jobs:
             PATH=~/.npm-global/bin:$PATH npm install --global npm
       - run: PATH=~/.npm-global/bin:$PATH node ./tests/legacy-cli/run_e2e --nb-shards=${CIRCLE_NODE_TOTAL} --shard=${CIRCLE_NODE_INDEX}
 
-  test-browsers:
-    executor:
-      name: test-executor
-    environment:
-      E2E_BROWSERS: true
-    steps:
-      - attach_workspace: *attach_options
-      - run:
-          name: Initialize Environment
-          command: ./.circleci/env.sh
-      - run:
-          name: Initialize Saucelabs
-          command: setSecretVar SAUCE_ACCESS_KEY $(echo $SAUCE_ACCESS_KEY | rev)
-      - run:
-          name: Start Saucelabs Tunnel
-          command: ./scripts/saucelabs/start-tunnel.sh
-          background: true
-        # Waits for the Saucelabs tunnel to be ready. This ensures that we don't run tests
-        # too early without Saucelabs not being ready.
-      - run: ./scripts/saucelabs/wait-for-tunnel.sh
-      - run: PATH=~/.npm-global/bin:$PATH node ./tests/legacy-cli/run_e2e ./tests/legacy-cli/e2e/tests/misc/browsers.ts
-      - run: ./scripts/saucelabs/stop-tunnel.sh
-
   build:
     executor: action-executor
     steps:
@@ -282,6 +249,34 @@ jobs:
   # Windows jobs
   # CircleCI support for Windows jobs is still in preview.
   # Docs: https://github.com/CircleCI-Public/windows-preview-docs
+  install-win:
+    executor: windows-executor
+    steps:
+      # TODO: remove commands other than the e2e runner when workspaces on windows are well supported.
+      - checkout
+      - setup_windows
+      - run:
+          name: Rebase PR on target branch
+          command: >
+            if (Test-Path env:CIRCLE_PR_NUMBER) {
+              git config user.name "angular-ci"
+              git config user.email "angular-ci"
+              node tools\rebase-pr.js angular/angular-cli $env:CIRCLE_PR_NUMBER }
+      - restore_cache:
+          keys:
+            - filipesilva-circleci-win-test-20190710     
+      - run: yarn install --frozen-lockfile
+      - save_cache:
+          key: filipesilva-circleci-win-test-20190710
+          paths:
+            - C:\Users\circleci\AppData\Local\Yarn\Cache\v4
+      # Only jobs downstream from this one will see the updated workspace
+      # https://circleci.com/blog/deep-diving-into-circleci-workspaces/
+      - persist_to_workspace:
+          root: .
+          paths:
+            - ./*            
+
   test-win:
     executor: windows-executor
     # Skipping cache and workspace for now because it takes 10x longer than on linux.
@@ -291,13 +286,14 @@ jobs:
     # - windows might need its own workspace for the same reason.
     # - get cache dir on windows via `yarn cache dir` (was `C:\Users\circleci\AppData\Local\Yarn\Cache\v4` last time)
     steps:
+      - attach_workspace: *attach_options
       - setup_windows
       # Build and test should be on their own jobs, but restoring workspaces is too slow
       # so we do it here.
       - run: yarn build
       - run: yarn test --full
       # Run partial e2e suite on PRs only. Master will run the full e2e suite with sharding.
-      - run: if (Test-Path env:CIRCLE_PR_NUMBER) { node tests\legacy-cli\run_e2e.js "--glob=tests/{basic,ivy}/**" }
+      # - run: if (Test-Path env:CIRCLE_PR_NUMBER) { node tests\legacy-cli\run_e2e.js "--glob=tests/{basic,ivy}/**" }
              
   e2e-cli-win:
     executor: windows-executor
@@ -312,87 +308,80 @@ workflows:
   default_workflow:
     jobs:
       - install
-      - lint:
+      - install-win:
           requires:
             - install
-      - validate:
-          requires:
-            - install
-      - build:
-          requires:
-            - install
-          filters:
-            branches:
-              ignore:
-              - /docs-preview/
-      - build-bazel:
-          requires:
-            - build
-      - test:
-          requires:
-            - build
+      # - lint:
+      #     requires:
+      #       - install
+      # - validate:
+      #     requires:
+      #       - install
+      # - build:
+      #     requires:
+      #       - install
+      #     filters:
+      #       branches:
+      #         ignore:
+      #         - /docs-preview/
+      # - build-bazel:
+      #     requires:
+      #       - build
+      # - test:
+      #     requires:
+      #       - build
       - test-win:
           requires:
-            - test
-      - test-large:
-          requires:
-            - build
-      - test-large:
-          name: test-large-ivy
-          ivy: true
-          glob: "packages/angular_devkit/build_angular/test/browser/*_spec_large.ts"
-          requires:
-            - build
-      - e2e-cli:
-          post-steps:
-            - store_artifacts:
-                path: /tmp/dist
-                destination: cli/new-production
-          requires:
-            - build
-      - e2e-cli:
-          name: e2e-cli-ivy
-          ivy: true
-          requires:
-            - build
-      - e2e-cli:
-          name: e2e-cli-ng-snapshots
-          snapshots: true
-          requires:
-            - e2e-cli
-          pre-steps:
-            - run:
-                name: Don't run expensive e2e snapshots tests for forks other than renovate-bot and angular
-                command: >
-                  if [[ "$CIRCLE_PR_USERNAME" != "renovate-bot" ]] &&
-                    [[ "$CIRCLE_PROJECT_USERNAME" != "angular" || $CIRCLE_BRANCH != "master" ]]; then
-                    circleci step halt
-                  fi
-      - e2e-cli-node-10:
-          <<: *ignore_pull_requests
-          requires:
-            - e2e-cli
-      - e2e-cli-win:
-          <<: *ignore_pull_requests
-          requires:
-            - e2e-cli
-      - test-browsers:
-          requires:
-            - build
-      - snapshot_publish:
-          <<: *ignore_pull_requests
-          requires:
-            - test
-            - build
-            - e2e-cli
-      - publish:
-          requires:
-            - test
-            - build
-            - e2e-cli
-            - snapshot_publish
-          filters:
-            tags:
-              only: /^v\d+/
-            branches:
-              ignore: /.*/
+            - install-win
+      # - test-large:
+      #     requires:
+      #       - build
+      # - test-large:
+      #     name: test-large-ivy
+      #     ivy: true
+      #     glob: "packages/angular_devkit/build_angular/test/browser/*_spec_large.ts"
+      #     requires:
+      #       - build
+      # - e2e-cli:
+      #     post-steps:
+      #       - store_artifacts:
+      #           path: /tmp/dist
+      #           destination: cli/new-production
+      #     requires:
+      #       - build
+      # - e2e-cli:
+      #     name: e2e-cli-ivy
+      #     ivy: true
+      #     requires:
+      #       - build
+      # - e2e-cli:
+      #     name: e2e-cli-ng-snapshots
+      #     snapshots: true
+      #     <<: *ignore_pull_requests
+      #     requires:
+      #       - e2e-cli
+      # - e2e-cli-node-10:
+      #     <<: *ignore_pull_requests
+      #     requires:
+      #       - e2e-cli
+      # - e2e-cli-win:
+      #     <<: *ignore_pull_requests
+      #     requires:
+      #       - e2e-cli
+      # - snapshot_publish:
+      #     <<: *ignore_pull_requests
+      #     requires:
+      #       - test
+      #       - build
+      #       - e2e-cli
+      # - publish:
+      #     requires:
+      #       - test
+      #       - build
+      #       - e2e-cli
+      #       - snapshot_publish
+      #     filters:
+      #       tags:
+      #         only: /^v\d+/
+      #       branches:
+      #         ignore: /.*/
