@@ -252,30 +252,26 @@ jobs:
   install-win:
     executor: windows-executor
     steps:
-      # TODO: remove commands other than the e2e runner when workspaces on windows are well supported.
-      - checkout
+      # attach linux workspace, has rebased code and yarn deps
+      - attach_workspace: *attach_options
       - setup_windows
-      - run:
-          name: Rebase PR on target branch
-          command: >
-            if (Test-Path env:CIRCLE_PR_NUMBER) {
-              git config user.name "angular-ci"
-              git config user.email "angular-ci"
-              node tools\rebase-pr.js angular/angular-cli $env:CIRCLE_PR_NUMBER }
       - restore_cache:
           keys:
-            - filipesilva-circleci-win-test-20190710     
+            - filipesilva-circleci-win-test-20190710
+      # install npm deps again to get windows binaries
       - run: yarn install --frozen-lockfile
       - save_cache:
           key: filipesilva-circleci-win-test-20190710
           paths:
             - C:\Users\circleci\AppData\Local\Yarn\Cache\v4
-      # Only jobs downstream from this one will see the updated workspace
+      # persist to workspace the windows changes
+      # only downstream jobs from this one will see these changes
       # https://circleci.com/blog/deep-diving-into-circleci-workspaces/
       - persist_to_workspace:
           root: .
           paths:
-            - ./*            
+            - ./*
+
 
   test-win:
     executor: windows-executor
